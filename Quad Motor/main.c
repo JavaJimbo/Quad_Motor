@@ -17,6 +17,7 @@
  * 2-20-18: 
  * 4-5-18:  Got this working with Xbee Dual Joystick 
  *          for four wheeler using Quad Motor Controller board V1.0
+ * 04-06-18:    Moved motor math from joystick to Quad board, so joystick data is transmitted.
  ****************************************************************************************/
 #define FORWARD 0
 #define REVERSE 1
@@ -229,6 +230,14 @@ unsigned short tenths = 0, seconds = 0, minutes = 0;
 unsigned char stopWatchOn = false;
 
 unsigned char dataFlag = FALSE;
+#define LSBLeftJoystickX HOSTRxBuffer[3]
+#define MSBLeftJoystickX HOSTRxBuffer[4]
+#define LSBLeftJoystickY HOSTRxBuffer[5]
+#define MSBLeftJoystickY HOSTRxBuffer[6]
+#define LSBRightJoystickX HOSTRxBuffer[7]
+#define MSBRightJoystickX HOSTRxBuffer[8]
+#define LSBRightJoystickY HOSTRxBuffer[9]
+#define MSBRightJoystickY HOSTRxBuffer[10]
 
 int main(void) {
     unsigned char command = 0, subCommand = 0;
@@ -242,6 +251,8 @@ int main(void) {
     unsigned char rightMotorMSB = 0, rightMotorLSB = 0, leftMotorMSB = 0, leftMotorLSB = 0;
     short PWMvalue = 0;
     unsigned char testChar = 'A';
+    short rightMotor, leftMotor;
+    short intLeftJoystickY, intLeftJoystickX, intRightJoystickY, intRightJoystickX;
     
     PWM1 = PWM2 = PWM3 = PWM4 = 0;
 
@@ -254,7 +265,40 @@ int main(void) {
             dataFlag = FALSE;
             command = HOSTRxBuffer[0];
             subCommand = HOSTRxBuffer[1];
-            if (command == ROOMBA) {
+            if (command == ROOMBA) {                
+            
+            convert.byte[0] = LSBLeftJoystickX;
+            convert.byte[1] = MSBLeftJoystickX;
+            intLeftJoystickX = convert.integer;
+            
+            convert.byte[0] = LSBLeftJoystickY;
+            convert.byte[1] = MSBLeftJoystickY;
+            intLeftJoystickY = convert.integer;
+            
+            convert.byte[0] = LSBRightJoystickX;
+            convert.byte[1] = MSBRightJoystickX;
+            intRightJoystickX = convert.integer;
+            
+            convert.byte[0] = LSBRightJoystickY;
+            convert.byte[1] = MSBRightJoystickY;
+            intRightJoystickY = convert.integer;
+            
+            rightMotor = (intRightJoystickY - intRightJoystickX) * 24;
+            PWMvalue = abs(rightMotor);
+            if (PWMvalue > MAXPWM) PWMvalue = MAXPWM;                  
+            PWM1 = PWM2 = PWMvalue;            
+            if (rightMotor < 0) DIR1_OUT = DIR2_OUT = REVERSE;
+            else DIR1_OUT = DIR2_OUT = FORWARD;
+            
+            leftMotor = (intRightJoystickY + intRightJoystickX) * 24;
+            PWMvalue = abs(leftMotor);
+            if (PWMvalue > MAXPWM) PWMvalue = MAXPWM;                  
+            PWM3 = PWM4 = PWMvalue;            
+            if (leftMotor < 0) DIR3_OUT = DIR4_OUT = FORWARD;
+            else DIR3_OUT = DIR4_OUT = REVERSE;
+            
+/*    
+ * 
                 rightMotorMSB = MotorData[0];
                 rightMotorLSB = MotorData[1];
                 leftMotorMSB = MotorData[2];
@@ -266,8 +310,6 @@ int main(void) {
                 if (PWMvalue > MAXPWM) PWMvalue = MAXPWM;                  
                 PWM1 = PWM2 = PWMvalue;
                 
-                DIR1_OUT = DIR2_OUT = REVERSE;
-                DIR3_OUT = DIR4_OUT = FORWARD;
                 if (convert.integer < 0) DIR1_OUT = DIR2_OUT = REVERSE;
                 else DIR1_OUT = DIR2_OUT = FORWARD;
                 
@@ -279,6 +321,7 @@ int main(void) {
                 
                 if (convert.integer < 0) DIR3_OUT = DIR4_OUT = FORWARD;
                 else DIR3_OUT = DIR4_OUT = REVERSE;
+*/ 
                 
             } else if (subCommand == QUIT) {
                 ;
@@ -502,10 +545,10 @@ void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
                     if (dataFlag == FALSE)
                     {
                         dataFlag = TRUE;
-                        MotorData[0] = HOSTRxBuffer[3];
-                        MotorData[1] = HOSTRxBuffer[4];
-                        MotorData[2] = HOSTRxBuffer[5];
-                        MotorData[3] = HOSTRxBuffer[6];
+                        //MotorData[0] = HOSTRxBuffer[3];
+                        //MotorData[1] = HOSTRxBuffer[4];
+                        //MotorData[2] = HOSTRxBuffer[5];
+                        //MotorData[3] = HOSTRxBuffer[6];
                     }
                     RxIndex = 0;
                     uartTimeout = 0;
