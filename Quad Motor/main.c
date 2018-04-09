@@ -17,36 +17,15 @@
  * 2-20-18: 
  * 4-5-18:  Got this working with Xbee Dual Joystick 
  *          for four wheeler using Quad Motor Controller board V1.0
- * 04-06-18:    Moved motor math from joystick to Quad board, so joystick data is transmitted.
+ * 4-6-18:  Moved motor math from joystick to Quad board, so joystick data is transmitted.
+ * 4-8-18:  Works with XBBE Dual Joystick - PID control steering four wheels.
  ****************************************************************************************/
+#define TESTOUT LATCbits.LATC0
 #define FORWARD 0
 #define REVERSE 1
-#define PWM_MAX 4095
+#define PWM_MAX 3000
+#define DIVIDER 256
 
-#define M1 0
-#define M2 1
-#define M3 2
-#define M4 3
-
-#define LEFTFRONTPWM M2
-#define LEFTFRONTENC TMR5        
-
-#define RIGHTFRONTPWM M1
-#define RIGHTFRONTENC TMR2
-    
-#define LEFTREARPWM M3
-#define LEFTREARENC TMR4   
-    
-#define RIGHTREARPWM M4
-#define RIGHTREARENC TMR3  
-
-#define USE_PWM
-// #define USE_AD
-// #define TEST_EEPROM
-
-// #define I2C_CLOCK_FREQ              100000
-// #define EEPROM_I2C_BUS              I2C1
-// #define EEPROM_ADDRESS              0x50     // 0b1010000 Serial EEPROM address    
 #define DISABLE_OUT PORTBbits.RB4
 #define FAULT_IN PORTCbits.RC1     
 
@@ -54,7 +33,6 @@
 #define EncoderTwo TMR4
 #define EncoderThree TMR3
 #define EncoderFour TMR5
-
 
 #define ENC1_LATCH PORTAbits.RA4
 #define ENC2_LATCH PORTBbits.RB2
@@ -76,7 +54,6 @@
 #define DIR3_OUT LATAbits.LATA10
 #define DIR4_OUT LATCbits.LATC7
 
-
 #define STX 36
 #define ETX 13
 #define DLE 16
@@ -95,10 +72,8 @@
 #define FULL 132
 #define QUIT 128
 #define SHUTDOWN 160
-
 #define STANDBY 0
 #define RUN 111
-
 
 #define SYS_FREQ 60000000
 #define GetPeripheralClock() SYS_FREQ 
@@ -142,38 +117,42 @@
 #define false FALSE
 #define true TRUE
 
-#define START_ONE 80
-#define START_TWO 80
-#define START_THREE 20
-#define START_FOUR 20
-#define TIMEOUT 200
-#define UART_TIMEOUT 400
-#define MAXBITLENGTH 20
-
 #define STX 36
 #define ETX 13
 #define DLE 16
 
+#define NUMMOTORS 4
 
 /** V A R I A B L E S ********************************************************/
-unsigned char HOSTRxBuffer[MAXBUFFER + 1];
-unsigned char HOSTTxBuffer[MAXBUFFER + 1];
-#define NUM_MOTORS 4
-#define NUM_MOTOR_REGISTERS (NUM_MOTORS * 2)
-unsigned char MotorData[NUM_MOTOR_REGISTERS];
 
-unsigned short RxLength = 0;
-unsigned short TxLength = 0;
+struct PIDtype
+{
+    long sumError;
+    short derIndex;
+    unsigned char saturationFlag;
+    short kP;
+    short kI;
+    short kD;
+    unsigned short PWMoffset;
+} PID[NUMMOTORS];
+#define MAXNUM 16
+unsigned char NUMbuffer[MAXNUM + 1];
 
-unsigned short previousExpected = 0, numExpectedBytes = 0;
-unsigned char error = 0;
-unsigned char RXstate = 0;
-unsigned char timeoutFlag = FALSE;
-unsigned short numBytesReceived = 0;
+#define MAXDER 3
+short errorDerivative[NUMMOTORS][MAXDER];
+
+void initializeErrorArrays(void){
+unsigned short i, j;
+
+    for(j = 0; j < NUMMOTORS; j++){
+        for(i = 0; i < MAXDER; i++) errorDerivative[j][i] = 0;
+    }
+}
+
 short uartTimeout = 0;
 unsigned char startFlag = false;
 unsigned char escapeFlag = false;
-unsigned short RxIndex = 0;
+unsigned short UARTRxIndex = 0;
 
 /** P R I V A T E  P R O T O T Y P E S ***************************************/
 extern unsigned char getCRC8(unsigned char *ptrMessage, short numBytes);
@@ -185,25 +164,9 @@ void YourLowPriorityISRCode();
 void BlinkUSBStatus(void);
 void UserInit(void);
 
-unsigned char PCAReadByte(unsigned char device, unsigned char PCAcontrolRegister, unsigned char *ptrData);
-unsigned char PCAWriteByte(unsigned char device, unsigned char PCAcontrolRegister, unsigned char data);
-
-unsigned char setPCA9685outputs(unsigned char device, unsigned short channel, unsigned short turnON, unsigned short turnOFF);
-unsigned char initializePCA9685(unsigned char device);
-unsigned int decodePacket(unsigned char *ptrInPacket, unsigned int numInBytes, unsigned char *ptrData);
-
-void Halt(void);
-unsigned char testRUN(short PWMvalue, unsigned char direction);
-long getPositionError(short i, short targetSpeed);
-long PIDcontrol(long error);
-unsigned char setMotorPWM(short side, short PWMvalue, unsigned char direction);
+short PIDcontrol(short servoID, short error);
 void putch(unsigned char ch);
-
-unsigned int decodePacket(unsigned char *ptrInPacket, unsigned int inPacketSize, unsigned char *ptrData);
-
-#define PWM_OFFSET 800
-
-long kP = 50, kI = 0, kD = 0;
+void putch1(unsigned char ch);
 
 
 union convertType {
@@ -211,126 +174,253 @@ union convertType {
     short integer;
 } convert;
 
-#define NUM_ENCODERS 2
-#define LEFT 0
-#define RIGHT 1
-long actualPos[NUM_ENCODERS], targetPos[NUM_ENCODERS];
-
-long errorLeft, errorRight, Lcorr, Rcorr, PWMleft, PWMright, posLeft, posRight;
-
 #define MAXPWM 3000
-unsigned char ch = 0;
 
+unsigned char intFlag = FALSE;
 
-#define RESET_DIRECTION 3
+#define CommandUART UART2
+unsigned char CommandBuffer[MAXBUFFER + 1];
+unsigned char CommandBufferFull = FALSE;
 
-unsigned short Timer2Counter = 0;
-unsigned char Timer2Flag = false;
-unsigned short tenths = 0, seconds = 0, minutes = 0;
-unsigned char stopWatchOn = false;
+//unsigned char HOSTRxBuffer[MAXBUFFER + 1];
+//unsigned char HOSTBufferFull = FALSE;
 
-unsigned char dataFlag = FALSE;
-#define LSBLeftJoystickX HOSTRxBuffer[3]
-#define MSBLeftJoystickX HOSTRxBuffer[4]
-#define LSBLeftJoystickY HOSTRxBuffer[5]
-#define MSBLeftJoystickY HOSTRxBuffer[6]
-#define LSBRightJoystickX HOSTRxBuffer[7]
-#define MSBRightJoystickX HOSTRxBuffer[8]
-#define LSBRightJoystickY HOSTRxBuffer[9]
-#define MSBRightJoystickY HOSTRxBuffer[10]
+#define CommandByte      CommandBuffer[0]
+#define SubCommandByte   CommandBuffer[1]
+#define TransmitLength   CommandBuffer[2]
+#define LSBLeftJoystickX CommandBuffer[3]
+#define MSBLeftJoystickX CommandBuffer[4]
+#define LSBLeftJoystickY CommandBuffer[5]
+#define MSBLeftJoystickY CommandBuffer[6]
+#define LSBRightJoystickX CommandBuffer[7]
+#define MSBRightJoystickX CommandBuffer[8]
+#define LSBRightJoystickY CommandBuffer[9]
+#define MSBRightJoystickY CommandBuffer[10]
+#define LSB_CRCresult     CommandBuffer[11]
+#define MSB_CRCresult     CommandBuffer[12]
 
-int main(void) {
-    unsigned char command = 0, subCommand = 0;
-    unsigned char MOT1Direction = 0, MOT2Direction = 0, MOT3Direction = 0, MOT4Direction = 0;
-    unsigned char PrevMOT1Direction = RESET_DIRECTION, PrevMOT2Direction = RESET_DIRECTION, PrevMOT3Direction = RESET_DIRECTION, PrevMOT4Direction = RESET_DIRECTION;
-    unsigned char NewDirection = 0;
-    long wheel1 = 0, wheel2 = 0, wheel3 = 0, wheel4 = 0;
-    long velocity1 = 0, velocity2 = 0, velocity3 = 0, velocity4 = 0;
-    short displayCounter = 0;
-    unsigned char displayMode = FALSE;
-    unsigned char rightMotorMSB = 0, rightMotorLSB = 0, leftMotorMSB = 0, leftMotorLSB = 0;
+unsigned char displayFlag = FALSE;
+
+int main(void) 
+{
+    // short jogPWM = 0;
+    unsigned char i = 0, p = 0, q = 0; 
     short PWMvalue = 0;
-    unsigned char testChar = 'A';
-    short rightMotor, leftMotor;
-    short intLeftJoystickY, intLeftJoystickX, intRightJoystickY, intRightJoystickX;
-    
+    short intLeftJoystickY = 0, intLeftJoystickX = 0, intRightJoystickY = 0, intRightJoystickX = 0;
+    unsigned short CRCresult;  
+    long ActualPosition1 = 0, ActualPosition2 = 0, ActualPosition3 = 0, ActualPosition4 = 0;
+    long CommandPosition1 = 0, CommandPosition2 = 0, CommandPosition3 = 0, CommandPosition4 = 0;    
+    long lngError = 0;
+    short Error1 = 0, Error2 = 0, Error3 = 0, Error4 = 0;
+    unsigned char runMode = TRUE;
+        
     PWM1 = PWM2 = PWM3 = PWM4 = 0;
 
+    for (i = 0; i < NUMMOTORS; i++)
+    {
+        PID[i].sumError = 0;
+        PID[i].derIndex = 0;
+        PID[i].saturationFlag = FALSE;
+        PID[i].kP = 200;
+        PID[i].kI = 10;
+        PID[i].kD = 200;
+        PID[i].PWMoffset = 100;
+    }
+    
     DelayMs(200);
-    UserInit();    
+    UserInit();      
+    printf("\rTesting PID");
     
     while (1) {        
         DelayMs(1);
-        if (dataFlag) {
-            dataFlag = FALSE;
-            command = HOSTRxBuffer[0];
-            subCommand = HOSTRxBuffer[1];
-            if (command == ROOMBA) {                
+        if (intFlag && runMode)
+        {
+            intFlag = FALSE;
+            // if (jogPWM != 0) intRightJoystickY = jogPWM;
+            CommandPosition1 = CommandPosition1 + (intRightJoystickY * 8) - (intRightJoystickX * 4);
+            CommandPosition2 = CommandPosition2 + (intRightJoystickY * 8) - (intRightJoystickX * 4);
+            CommandPosition3 = CommandPosition3 + (intRightJoystickY * 8) + (intRightJoystickX * 4);
+            CommandPosition4 = CommandPosition4 + (intRightJoystickY * 8) + (intRightJoystickX * 4
+                    );
             
-            convert.byte[0] = LSBLeftJoystickX;
-            convert.byte[1] = MSBLeftJoystickX;
-            intLeftJoystickX = convert.integer;
+            if (DIR1_OUT == FORWARD) 
+                ActualPosition1 = ActualPosition1 + (long) (EncoderOne * DIVIDER); 
+            else ActualPosition1 = ActualPosition1 - (long) (EncoderOne * DIVIDER); 
+            EncoderOne = 0;                                    
             
-            convert.byte[0] = LSBLeftJoystickY;
-            convert.byte[1] = MSBLeftJoystickY;
-            intLeftJoystickY = convert.integer;
+            if (DIR2_OUT == FORWARD) 
+                ActualPosition2 = ActualPosition2 + (long) (EncoderTwo * DIVIDER);
+            else ActualPosition2 = ActualPosition2 - (long) (EncoderTwo * DIVIDER);
+            EncoderTwo = 0;
             
-            convert.byte[0] = LSBRightJoystickX;
-            convert.byte[1] = MSBRightJoystickX;
-            intRightJoystickX = convert.integer;
+            if (DIR3_OUT == FORWARD) 
+                ActualPosition3 = ActualPosition3 - (long) (EncoderThree * DIVIDER);
+            else ActualPosition3 = ActualPosition3 + (long) (EncoderThree * DIVIDER);
+            EncoderThree = 0;
             
-            convert.byte[0] = LSBRightJoystickY;
-            convert.byte[1] = MSBRightJoystickY;
-            intRightJoystickY = convert.integer;
+            if (DIR4_OUT == FORWARD) 
+                ActualPosition4 = ActualPosition4 - (long) (EncoderFour * DIVIDER);
+            else ActualPosition4 = ActualPosition4 + (long) (EncoderFour * DIVIDER);
+            EncoderFour = 0;
             
-            rightMotor = (intRightJoystickY - intRightJoystickX) * 24;
-            PWMvalue = abs(rightMotor);
-            if (PWMvalue > MAXPWM) PWMvalue = MAXPWM;                  
-            PWM1 = PWM2 = PWMvalue;            
-            if (rightMotor < 0) DIR1_OUT = DIR2_OUT = REVERSE;
-            else DIR1_OUT = DIR2_OUT = FORWARD;
+            lngError = ActualPosition1 - CommandPosition1;
+            if (lngError > 0x7FFF) lngError = 0x7FFF;
+            else if (lngError < -0x7FFF) lngError = -0x7FFF;
+            Error1 = (short) lngError;
+         
+            lngError = ActualPosition2 - CommandPosition2;
+            if (lngError > 0x7FFF) lngError = 0x7FFF;
+            else if (lngError < -0x7FFF) lngError = -0x7FFF;
+            Error2 = (short) lngError;
+         
+            lngError = ActualPosition3 - CommandPosition3;
+            if (lngError > 0x7FFF) lngError = 0x7FFF;
+            else if (lngError < -0x7FFF) lngError = -0x7FFF;
+            Error3 = (short) lngError;
+         
+            lngError = ActualPosition4 - CommandPosition4;
+            if (lngError > 0x7FFF) lngError = 0x7FFF;
+            else if (lngError < -0x7FFF) lngError = -0x7FFF;
+            Error4 = (short) lngError;
+
+            PWMvalue = PIDcontrol(0, Error1);
+            if (PWMvalue < 0)          
+            {            
+                DIR1_OUT = REVERSE;
+                PWMvalue = 0 - PWMvalue;
+            }
+            else DIR1_OUT = FORWARD;                      
+            PWM1 = PWMvalue;
+
+            PWMvalue = PIDcontrol(1, Error2);
+            if (PWMvalue < 0)          
+            {            
+                DIR2_OUT = REVERSE;
+                PWMvalue = 0 - PWMvalue;
+            }
+            else DIR2_OUT = FORWARD;                      
+            PWM2 = PWMvalue;
             
-            leftMotor = (intRightJoystickY + intRightJoystickX) * 24;
-            PWMvalue = abs(leftMotor);
-            if (PWMvalue > MAXPWM) PWMvalue = MAXPWM;                  
-            PWM3 = PWM4 = PWMvalue;            
-            if (leftMotor < 0) DIR3_OUT = DIR4_OUT = FORWARD;
-            else DIR3_OUT = DIR4_OUT = REVERSE;
+            PWMvalue = PIDcontrol(2, Error3);
+            if (PWMvalue < 0)          
+            {            
+                DIR3_OUT = FORWARD;
+                PWMvalue = 0 - PWMvalue;
+            }
+            else DIR3_OUT = REVERSE;                      
+            PWM3 = PWMvalue;
             
-/*    
- * 
-                rightMotorMSB = MotorData[0];
-                rightMotorLSB = MotorData[1];
-                leftMotorMSB = MotorData[2];
-                leftMotorLSB = MotorData[3];
-                
-                convert.byte[1] = rightMotorMSB;
-                convert.byte[0] = rightMotorLSB;
-                PWMvalue = abs(convert.integer) * 3;
-                if (PWMvalue > MAXPWM) PWMvalue = MAXPWM;                  
-                PWM1 = PWM2 = PWMvalue;
-                
-                if (convert.integer < 0) DIR1_OUT = DIR2_OUT = REVERSE;
-                else DIR1_OUT = DIR2_OUT = FORWARD;
-                
-                convert.byte[1] = leftMotorMSB;
-                convert.byte[0] = leftMotorLSB;  
-                PWMvalue = abs(convert.integer) * 3;
-                if (PWMvalue > MAXPWM) PWMvalue = MAXPWM;                    
-                PWM3 = PWM4 = PWMvalue;
-                
-                if (convert.integer < 0) DIR3_OUT = DIR4_OUT = FORWARD;
-                else DIR3_OUT = DIR4_OUT = REVERSE;
-*/ 
-                
-            } else if (subCommand == QUIT) {
-                ;
-            } else if (subCommand == SHUTDOWN) {
-                ;
-            }            
-        }                
-    }
-}
+            PWMvalue = PIDcontrol(3, Error4);
+            if (PWMvalue < 0)          
+            {            
+                DIR4_OUT = FORWARD;
+                PWMvalue = 0 - PWMvalue;
+            }
+            else DIR4_OUT = REVERSE;                      
+            PWM4 = PWMvalue;                        
+        }
+        else if (runMode == FALSE)
+        {
+            CommandPosition1 = ActualPosition1 = 0;
+            PWM1 = PWM2 = PWM3 = PWM4 = 0;
+        }
+        
+        /*
+        if (HOSTBufferFull)
+        {
+            HOSTBufferFull = FALSE;
+            printf("\rReceived: ");
+            q = 0;
+            command = 0;
+            for (p = 0; p < MAXBUFFER; p++) {
+                ch = toupper (HOSTRxBuffer[p]);
+                if (isalpha(ch)) command = ch;
+                else if (ch == ' ') command = ' ';
+                putch(ch);
+                if (ch == '\r' || ch == ' ')break;
+                if ((isdigit(ch) || ch == '-') && q < MAXNUM) NUMbuffer[q++] = ch;
+            }
+            if (q) {
+                NUMbuffer[q] = '\0';
+                value = atoi(NUMbuffer);
+            }
+            if (command) {
+                switch (command) {
+                    case 'J':
+                        jogPWM = value;
+                        printf("\rJog: %d", jogPWM);
+                        break;
+                    case 'P':
+                        if (q) PID[0].kP = value;
+                        break;
+                    case 'I':
+                        if (q) PID[0].kI = value;
+                        break;
+                    case 'D':
+                        if (q) PID[0].kD = value;
+                        break;
+                    case 'O':
+                        if (q) PID[0].PWMoffset = value;
+                        break;
+                    case ' ':
+                        if (runMode){
+                            runMode = FALSE;
+                            printf("\rHALT");
+                        }
+                        else {
+                            runMode = TRUE;
+                            printf("\rRUN");
+                        }
+                        break;
+                    case 'M':
+                        if (displayFlag){
+                            displayFlag = FALSE;
+                            printf("\rDisplay OFF");
+                        }
+                        else {
+                            displayFlag = TRUE;
+                            printf("\rDisplay ON");
+                        }                            
+                    default:
+                        printf("\rCommand: %c", command);
+                        break;
+                }
+                printf("\rkP=%d, kI=%d, kD=%d, OFFSET: %d", PID[0].kP, PID[0].kI, PID[0].kD, PID[0].PWMoffset);
+                command = 0;
+            }
+            putch('\r');
+        }
+        */
+        
+        if (CommandBufferFull) 
+        {
+            CommandBufferFull = FALSE;
+            
+            if (CommandByte == ROOMBA) {                            
+                convert.byte[0] = LSBLeftJoystickX;
+                convert.byte[1] = MSBLeftJoystickX;
+                intLeftJoystickX = convert.integer;
+            
+                convert.byte[0] = LSBLeftJoystickY;
+                convert.byte[1] = MSBLeftJoystickY;
+                intLeftJoystickY = convert.integer;
+            
+                convert.byte[0] = LSBRightJoystickX;
+                convert.byte[1] = MSBRightJoystickX;
+                intRightJoystickX = convert.integer;
+            
+                convert.byte[0] = LSBRightJoystickY;
+                convert.byte[1] = MSBRightJoystickY;
+                intRightJoystickY = convert.integer;
+            
+                convert.byte[0] = LSB_CRCresult;
+                convert.byte[1] = MSB_CRCresult;
+                CRCresult = convert.integer;            
+            } // End if command == ROOMBA
+        } // End if UART buffer full
+        
+    } // End while(1))
+} // End main())
 
 
 void putch(unsigned char ch) {
@@ -338,29 +428,10 @@ void putch(unsigned char ch) {
     U2TXREG = ch;
 }
 
-
-
-/******************************************************************************
- * Function:        void UserInit(void)
- *
- * PreCondition:    None
- *
- * Input:           None
- *
- * Output:          None
- *
- * Side Effects:    None
- *
- * Overview:        This routine should take care of all of the demo code
- *                  initialization that is required.
- *
- * Note:            
- * PPSInput(2,U2RX,RPA9);       // Assign U2RX to pin RPA09
- * PPSInput(3,U2CTS,RPC3);      // Assign U2CTS to pin RPC3
- * PPSOutput(4,RPC4,U2TX);      // Assign U2TX to pin RPC4
- * PPSOutput(1,RPB15,U2RTS);    // Assign U2RTS to pin RPB15    
- *
- *****************************************************************************/
+void putch1(unsigned char ch) {
+    while (!IFS1bits.U1TXIF); // set when register is empty 
+    U1TXREG = ch;
+}
 
 
 void  UserInit(void)
@@ -375,10 +446,13 @@ void  UserInit(void)
     DIR1_OUT = DIR2_OUT = DIR3_OUT = DIR4_OUT = 0;
 
     PORTSetPinsDigitalIn(IOPORT_C, BIT_1 | BIT_9);
+    PORTSetPinsDigitalOut(IOPORT_C, BIT_0);
 
     ANSELBbits.ANSB15 = 0;
     ANSELBbits.ANSB14 = 0;
     ANSELBbits.ANSB13 = 0;
+    ANSELCbits.ANSC3 = 0;  // For Pin 36 - CommandUART RX
+    
     PORTSetPinsDigitalIn(IOPORT_B, BIT_13 | BIT_14 | BIT_15);
     DISABLE_OUT = 0;
 
@@ -389,7 +463,25 @@ void  UserInit(void)
     PPSInput(2, U2RX, RPA8);
     // PPSOutput(4, RPC9, U2TX);    
     // PPSInput(2, U2RX, RPC8);
+    PPSOutput(1, RPB3, U1TX); // Rev 1.0
+    PPSInput(3, U1RX, RPC3); // Rev 1.0
+    
+    /*
+    // Configure UART #1
+    UARTConfigure(CommandUART, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
+    UARTSetFifoMode(CommandUART, UART_INTERRUPT_ON_RX_NOT_EMPTY); //  | UART_INTERRUPT_ON_TX_DONE  
+    UARTSetLineControl(CommandUART, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
+    UARTSetDataRate(CommandUART, SYS_FREQ, 57600);
+    UARTEnable(CommandUART, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
 
+    // Configure UART #1 Interrupts
+    INTEnable(INT_U1TX, INT_DISABLED);
+    INTEnable(INT_U1RX, INT_ENABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(CommandUART), INT_PRIORITY_LEVEL_2);
+    INTSetVectorSubPriority(INT_VECTOR_UART(CommandUART), INT_SUB_PRIORITY_LEVEL_0);
+    */
+    
+    // Configure UART #2 (HOST UART))
     UARTConfigure(HOSTuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
     UARTSetFifoMode(HOSTuart, UART_INTERRUPT_ON_RX_NOT_EMPTY); //  | UART_INTERRUPT_ON_TX_DONE  
     UARTSetLineControl(HOSTuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
@@ -400,7 +492,7 @@ void  UserInit(void)
     INTEnable(INT_U2TX, INT_DISABLED);
     INTEnable(INT_U2RX, INT_ENABLED);
     INTSetVectorPriority(INT_VECTOR_UART(HOSTuart), INT_PRIORITY_LEVEL_2);
-    INTSetVectorSubPriority(INT_VECTOR_UART(HOSTuart), INT_SUB_PRIORITY_LEVEL_0);
+    INTSetVectorSubPriority(INT_VECTOR_UART(HOSTuart), INT_SUB_PRIORITY_LEVEL_0);    
 
     do {
         ch = UARTGetDataByte(HOSTuart);
@@ -465,7 +557,7 @@ void  UserInit(void)
     OC1CONbits.OC32 = 0; // 16 bit PWM
     OC1CONbits.ON = 1; // Turn on PWM
     OC1CONbits.OCTSEL = 0; // Use Timer 2 as PWM time base
-    OC1CONbits.OCM2 = 1; // PWM mode enabled, no fault pin
+    OC1CONbits.OCM2 = 1; // PWM runMode enabled, no fault pin
     OC1CONbits.OCM1 = 1;
     OC1CONbits.OCM0 = 0;
     OC1RS = 0;
@@ -476,7 +568,7 @@ void  UserInit(void)
     OC2CONbits.OC32 = 0; // 16 bit PWM
     OC2CONbits.ON = 1; // Turn on PWM
     OC2CONbits.OCTSEL = 0; // Use Timer 2 as PWM time base
-    OC2CONbits.OCM2 = 1; // PWM mode enabled, no fault pin
+    OC2CONbits.OCM2 = 1; // PWM runMode enabled, no fault pin
     OC2CONbits.OCM1 = 1;
     OC2CONbits.OCM0 = 0;
     OC2RS = 0;
@@ -487,7 +579,7 @@ void  UserInit(void)
     OC3CONbits.OC32 = 0; // 16 bit PWM
     OC3CONbits.ON = 1; // Turn on PWM
     OC3CONbits.OCTSEL = 0; // Use Timer 2 as PWM time base
-    OC3CONbits.OCM2 = 1; // PWM mode enabled, no fault pin
+    OC3CONbits.OCM2 = 1; // PWM runMode enabled, no fault pin
     OC3CONbits.OCM1 = 1;
     OC3CONbits.OCM0 = 0;
     OC3RS = 0;
@@ -498,7 +590,7 @@ void  UserInit(void)
     OC4CONbits.OC32 = 0; // 16 bit PWM
     OC4CONbits.ON = 1; // Turn on PWM
     OC4CONbits.OCTSEL = 0; // Use Timer 2 as PWM time base
-    OC4CONbits.OCM2 = 1; // PWM mode enabled, no fault pin
+    OC4CONbits.OCM2 = 1; // PWM runMode enabled, no fault pin
     OC4CONbits.OCM1 = 1;
     OC4CONbits.OCM0 = 0;
     OC4RS = 0;
@@ -512,113 +604,22 @@ void  UserInit(void)
     INTEnableSystemMultiVectoredInt();
 }//end UserInit
 
-void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
 
-
-    if (INTGetFlag(INT_SOURCE_UART_RX(HOSTuart))) {
-        INTClearFlag(INT_SOURCE_UART_RX(HOSTuart));
-        if (HOSTbits.OERR || HOSTbits.FERR) {
-            if (UARTReceivedDataIsAvailable(HOSTuart))
-                ch = UARTGetDataByte(HOSTuart);
-            HOSTbits.OERR = 0;
-            RxIndex = 0;
-        }
-
-
-        if (UARTReceivedDataIsAvailable(HOSTuart)) {
-            ch = UARTGetDataByte(HOSTuart);
-            uartTimeout = 20;
-
-            // Store next char if packet is valid and board number matches
-            if (startFlag && RxIndex < MAXBUFFER) HOSTRxBuffer[RxIndex] = ch;
-
-            // If preceding character wasn't an escape char:
-            // check whether it is STX, ETX or DLE,
-            // otherwise if board number matches then store and advance for next char
-            if (escapeFlag == false || startFlag == false) {
-                if (ch == DLE) escapeFlag = true;
-                else if (ch == STX) {
-                    RxIndex = 0;
-                    startFlag = true;
-                } else if (ch == ETX) {
-                    startFlag = false;  
-                    if (dataFlag == FALSE)
-                    {
-                        dataFlag = TRUE;
-                        //MotorData[0] = HOSTRxBuffer[3];
-                        //MotorData[1] = HOSTRxBuffer[4];
-                        //MotorData[2] = HOSTRxBuffer[5];
-                        //MotorData[3] = HOSTRxBuffer[6];
-                    }
-                    RxIndex = 0;
-                    uartTimeout = 0;
-                } else if (startFlag) RxIndex++;
-            }// Otherwise if preceding character was an escape char:	
-            else {
-                escapeFlag = false;
-                if (startFlag) RxIndex++;
-            }
-        }
-        if (INTGetFlag(INT_SOURCE_UART_TX(HOSTuart))) {
-            INTClearFlag(INT_SOURCE_UART_TX(HOSTuart));
-        }
-    }
-}
-
-
-#define MULTIPLIER 100
-
-long getPositionError(short wheel, short targetSpeed) 
+// Timer 2 generates an interrupt every 50 microseconds approximately
+void __ISR(_TIMER_2_VECTOR, ipl2) Timer2Handler(void) 
 {
-    long error, newPos, lngTargetSpeed;
-
-    if (wheel >= NUM_ENCODERS) return (0);
-
-    if (wheel == LEFT) {
-        newPos = (long) LEFTREARENC;
-        //LEFTREARENC = 0;
-    } else {
-        newPos = (long) RIGHTREARENC;
-        //RIGHTREARENC = 0;        
-    }
-
-    lngTargetSpeed = (long) abs(targetSpeed);
-
-    actualPos[wheel] = (newPos * (long) MULTIPLIER);
-    targetPos[wheel] = targetPos[wheel] + lngTargetSpeed;
-
-    if (wheel == LEFT) posLeft = actualPos[wheel];
-    else posRight = actualPos[wheel];
-
-    error = actualPos[wheel] - targetPos[wheel];
-
-    if (wheel == LEFT) {
-        errorLeft = error / MULTIPLIER;
-    } else {
-        errorRight = error / MULTIPLIER;
-    }
-
-    return (error);
-}
-
-#define DIVIDER 10000
-
-long PIDcontrol(long error) {
-    long PIDcorrection;
-    long PCorr = 0;
-
-    PCorr = error * kP;
-    PIDcorrection = PCorr;
-    PIDcorrection = PIDcorrection / DIVIDER;
-    if (PIDcorrection > PWM_MAX) PIDcorrection = PWM_MAX;
-    if (PIDcorrection < -PWM_MAX) PIDcorrection = -PWM_MAX;
-
-    return (PIDcorrection);
-}
-
-// Timer 2 generates an interrupt every 51 microseconds approximately
-void __ISR(_TIMER_2_VECTOR, ipl2) Timer2Handler(void) {
+    static int intCounter = 0;
+    
     mT2ClearIntFlag(); // Clear interrupt flag
+    if (TESTOUT) TESTOUT = 0;
+    else TESTOUT = 1;
+    
+    intCounter++;
+    if (intCounter >= 80)
+    {
+        intCounter = 0;
+        intFlag = TRUE;
+    }
     if (uartTimeout)
     {
         uartTimeout--;
@@ -626,7 +627,171 @@ void __ISR(_TIMER_2_VECTOR, ipl2) Timer2Handler(void) {
         {
             startFlag = false;
             escapeFlag = false;
-            RxIndex = 0;        
+            UARTRxIndex = 0;        
         }
     }
 }
+
+
+
+
+ short PIDcontrol(short servoID, short error){
+    short PWMout;
+    long PIDcorrection, lngError;    
+    long diffError, pastError;
+    long PCorr = 0, ICorr = 0, DCorr = 0;
+    short intPCorr, intICorr, intDCorr, intError;
+    static short DisplayCounter = 25;
+        
+    lngError = (long) error;   
+    if (!PID[servoID].saturationFlag) PID[servoID].sumError = PID[servoID].sumError + lngError;    
+    
+    pastError = (long) errorDerivative[servoID][PID[servoID].derIndex];    
+    diffError = lngError - pastError;
+    
+    errorDerivative[servoID][PID[servoID].derIndex] = error;
+    PID[servoID].derIndex++; if (PID[servoID].derIndex >= MAXDER) PID[servoID].derIndex = 0;     
+    
+    PCorr = lngError * (long) PID[servoID].kP;
+    ICorr = PID[servoID].sumError * (long) PID[servoID].kI;
+    DCorr = diffError * (long) PID[servoID].kD;
+
+    PIDcorrection = -(PCorr + ICorr + DCorr);
+    PIDcorrection = PIDcorrection / DIVIDER;     
+    
+    if (PIDcorrection < 0) 
+        PWMout = (short) PIDcorrection - PID[servoID].PWMoffset;            
+    else PWMout = (short) PIDcorrection + PID[servoID].PWMoffset;
+    
+    if (PWMout > PWM_MAX) 
+    {
+        PWMout = PWM_MAX;
+        PID[servoID].saturationFlag = TRUE;
+    }
+    else if (PWMout < -PWM_MAX) {
+        PWMout = 0 - PWM_MAX;
+        PID[servoID].saturationFlag = TRUE;
+    }
+    else PID[servoID].saturationFlag = FALSE;    
+    
+    intPCorr = (short) (PCorr / DIVIDER);   
+    intICorr = (short) (ICorr / DIVIDER);
+    intDCorr = (short) (DCorr / DIVIDER);    
+    intError = error / DIVIDER;
+
+    if (displayFlag){
+        if (DisplayCounter) DisplayCounter--;
+        else {
+            printf("\rERR: %d, P: %d, I %d, D: %d, PWM: %d", intError, intPCorr, intICorr, intDCorr, PWMout);
+            DisplayCounter = 25;
+        }           
+    }
+    
+    return (PWMout);
+}
+
+#define UART_TIMEOUT 20
+void __ISR(_UART_2_VECTOR, ipl2) IntUartCommandHandler(void) 
+{
+unsigned char ch;
+
+    if (INTGetFlag(INT_SOURCE_UART_RX(CommandUART))) 
+    {
+        INTClearFlag(INT_SOURCE_UART_RX(CommandUART));
+        if (U2STAbits.OERR || U2STAbits.FERR) 
+        {
+            if (UARTReceivedDataIsAvailable(CommandUART))
+                ch = UARTGetDataByte(CommandUART);
+            U2STAbits.OERR = 0;
+            UARTRxIndex = 0;
+        }
+
+        if (UARTReceivedDataIsAvailable(CommandUART)) 
+        {
+            ch = UARTGetDataByte(CommandUART);
+            uartTimeout = UART_TIMEOUT;
+
+            // Store next char if packet is valid and board number matches
+            if (startFlag && UARTRxIndex < MAXBUFFER) CommandBuffer[UARTRxIndex] = ch;
+
+            // If preceding character wasn't an escape char:
+            // check whether it is STX, ETX or DLE,
+            // otherwise if board number matches then store and advance for next char
+            if (escapeFlag == false || startFlag == false) 
+            {
+                if (ch == DLE) escapeFlag = true;
+                else if (ch == STX) 
+                {
+                    UARTRxIndex = 0;
+                    startFlag = true;
+                } 
+                else if (ch == ETX) 
+                {
+                    startFlag = false;  
+                    CommandBufferFull = TRUE;                    
+                    UARTRxIndex = 0;
+                    uartTimeout = 0;
+                } 
+                else if (startFlag) UARTRxIndex++;
+            }// Otherwise if preceding character was an escape char:	
+            else 
+            {
+                escapeFlag = false;
+                if (startFlag) UARTRxIndex++;
+            }
+        } // If RX data available
+    } // End if RX intereeupt
+    if (INTGetFlag(INT_SOURCE_UART_TX(CommandUART))) 
+        INTClearFlag(INT_SOURCE_UART_TX(CommandUART));            
+}
+
+
+/*
+#define ESC 27
+#define CR 13
+#define BACKSPACE 8
+void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) 
+{
+unsigned char ch;
+static unsigned short i = 0;
+
+    if (INTGetFlag(INT_SOURCE_UART_RX(HOSTuart))) 
+    {
+        INTClearFlag(INT_SOURCE_UART_RX(HOSTuart));                 
+        if (HOSTbits.OERR || HOSTbits.FERR) {
+            if (UARTReceivedDataIsAvailable(HOSTuart))
+                ch = UARTGetDataByte(HOSTuart);
+            HOSTbits.OERR = 0;            
+        }
+        if (UARTReceivedDataIsAvailable(HOSTuart)) 
+        {
+            ch = UARTGetDataByte(HOSTuart);            
+            if (ch != 0 && ch != '\n') {            
+                if (ch == BACKSPACE) 
+                {
+                    if (i != 0) i--;
+                    HOSTRxBuffer[i] = '\0';
+                    while(!UARTTransmitterIsReady(HOSTuart));
+                    UARTSendDataByte (HOSTuart, ' ');
+                    while(!UARTTransmitterIsReady(HOSTuart));
+                    UARTSendDataByte (HOSTuart, BACKSPACE);                
+                } 
+                else if (i < MAXBUFFER) 
+                {
+                    HOSTRxBuffer[i] = toupper(ch);
+                    i++;
+                }            
+                if ('\r' == ch || ' ' == ch) 
+                {
+                    HOSTBufferFull = TRUE;
+                    HOSTRxBuffer[i] = '\0';
+                    i = 0;
+                }
+            }
+        }
+    }         
+    
+    if (INTGetFlag(INT_SOURCE_UART_TX(HOSTuart))) 
+        INTClearFlag(INT_SOURCE_UART_TX(HOSTuart));            
+}
+*/

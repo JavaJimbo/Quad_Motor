@@ -4,15 +4,6 @@
     <logicalFolder name="HeaderFiles"
                    displayName="Header Files"
                    projectFiles="true">
-      <logicalFolder name="Common" displayName="Common" projectFiles="true">
-        <itemPath>../../../../Microchip/Include/GenericTypeDefs.h</itemPath>
-        <itemPath>../../../../Microchip/Include/Compiler.h</itemPath>
-      </logicalFolder>
-      <itemPath>../HardwareProfile.h</itemPath>
-      <itemPath>../HardwareProfile - PIC32MX795F512L PIM.h</itemPath>
-      <itemPath>../Defs.h</itemPath>
-      <itemPath>../pps.h</itemPath>
-      <itemPath>../I2C_EEPROM_PIC32.h</itemPath>
       <itemPath>../Delay.h</itemPath>
     </logicalFolder>
     <logicalFolder name="LinkerScript"
